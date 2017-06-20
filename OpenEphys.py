@@ -15,6 +15,8 @@ import scipy.io
 import time
 import struct
 from copy import deepcopy
+from scipy.signal import argrelmax, argrelmin # used in remove_artifact
+
 
 # constants
 NUM_HEADER_BYTES = 1024
@@ -23,9 +25,9 @@ RECORD_SIZE = 8 + 16 + SAMPLES_PER_RECORD*2 + 10 # size of each continuous recor
 RECORD_MARKER = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 255])
 
 # constants for pre-allocating matrices:
-MAX_NUMBER_OF_SPIKES = 1e6
-MAX_NUMBER_OF_RECORDS = 1e6
-MAX_NUMBER_OF_CONTINUOUS_SAMPLES = 1e8
+MAX_NUMBER_OF_SPIKES = np.int32(1e6)
+MAX_NUMBER_OF_RECORDS = np.int32(1e6)
+MAX_NUMBER_OF_CONTINUOUS_SAMPLES = np.int32(1e8)
 MAX_NUMBER_OF_EVENTS = np.int32(1e6)
 
 def load(filepath):
@@ -150,9 +152,9 @@ def loadContinuous(filepath, dtype = float):
         recordingNumbers[recordNumber] = (np.fromfile(f,np.dtype('>u2'),1)) # big-endian 16-bit unsigned integer
         
         if dtype == float: # Convert data to float array and convert bits to voltage.
-            data = np.fromfile(f,np.dtype('>i2'),N) * float(header['bitVolts']) # big-endian 16-bit signed integer, multiplied by bitVolts   
+            data = np.fromfile(f,np.dtype('>i2'),int(N)) * float(header['bitVolts']) # big-endian 16-bit signed integer, multiplied by bitVolts
         else:  # Keep data in signed 16 bit integer format.
-            data = np.fromfile(f,np.dtype('>i2'),N)  # big-endian 16-bit signed integer
+            data = np.fromfile(f,np.dtype('>i2'),int(N))  # big-endian 16-bit signed integer
         try:
             samples[indices[recordNumber]:indices[recordNumber+1]] = data            
         except ValueError:
@@ -169,6 +171,92 @@ def loadContinuous(filepath, dtype = float):
     ch['data'] = samples[0:indices[recordNumber]]  # OR use downsample(samples,1), to save space
     ch['recordingNumber'] = recordingNumbers[0:recordNumber]
     f.close()
+    return ch
+
+def loadContinuous_BoMod(filepath, trim, dtype = float):
+    ''' May, 2017
+        Modified by Bo
+        Added trim, which is a list of start/stop pairs for noisy regions that must be removed.
+        This code assumes that start/stop paris are ordered from largest to smallest '''
+    
+    assert dtype in (float, np.int16), \
+        'Invalid data type specified for loadContinous, valid types are float and np.int16'
+    
+    print("Loading continuous data...")
+
+    ch = { }
+    recordNumber = np.intp(-1)
+    
+    #    f = open(filepath,'rb')
+    #    header = readHeader(f)
+    
+    ##preallocate the data array
+    #    while f.tell() < os.fstat(f.fileno()).st_size:
+    #        newSampleNumber = np.fromfile(f,np.dtype('<i8'),1)
+    #        N = np.fromfile(f,np.dtype('<u2'),1);
+    #        recordingNumber = np.fromfile(f,np.dtype('>u2'),1)
+    #        data = np.fromfile(f,np.dtype('>i2'),N)
+    #        marker = f.read(10)
+    #        totalN = totalN+1
+    
+    #    f.close
+    # pre-allocate samples
+    samples = np.zeros(MAX_NUMBER_OF_CONTINUOUS_SAMPLES, dtype)
+    timestamps = np.zeros(MAX_NUMBER_OF_RECORDS)
+    recordingNumbers = np.zeros(MAX_NUMBER_OF_RECORDS)
+    indices = np.arange(0,MAX_NUMBER_OF_RECORDS*SAMPLES_PER_RECORD, SAMPLES_PER_RECORD, np.dtype(np.int64))
+    
+    #read in the data
+    f = open(filepath,'rb')
+    
+    header = readHeader(f)
+    
+    fileLength = os.fstat(f.fileno()).st_size
+    #print fileLength
+    #print f.tell()
+    
+    while f.tell() < fileLength:
+        
+        recordNumber += 1
+        
+        timestamps[recordNumber] = np.fromfile(f,np.dtype('<i8'),1) # little-endian 64-bit signed integer
+        N = np.fromfile(f,np.dtype('<u2'),1) # little-endian 16-bit unsigned integer
+        
+        #print index
+        
+        if N != SAMPLES_PER_RECORD:
+            raise Exception('Found corrupted record in block ' + str(recordNumber))
+        
+        recordingNumbers[recordNumber] = (np.fromfile(f,np.dtype('>u2'),1)) # big-endian 16-bit unsigned integer
+        
+        if dtype == float: # Convert data to float array and convert bits to voltage.
+            data = np.fromfile(f,np.dtype('>i2'),int(N)) * float(header['bitVolts']) # big-endian 16-bit signed integer, multiplied by bitVolts
+        else:  # Keep data in signed 16 bit integer format.
+            data = np.fromfile(f,np.dtype('>i2'),int(N))  # big-endian 16-bit signed integer
+        try:
+            samples[indices[recordNumber]:indices[recordNumber+1]] = data
+        except ValueError:
+            print(type(index))
+            raise
+
+        marker = f.read(10) # dump
+
+    #print recordNumber
+    #print index
+
+    # trim data if trim values are given
+    ch['header'] = header
+    ch['timestamps'] = timestamps[0:recordNumber]
+    ch['recordingNumber'] = recordingNumbers[0:recordNumber]
+    if trim != 0:
+        data_temp = samples[0:indices[recordNumber]]  # OR use downsample(samples,1), to save space
+        print('Trimming data')
+        for i in range(len(trim)):
+            data_temp = np.delete(data_temp,np.arange(trim[i][0],trim[i][1],1),axis=0)
+        ch['data'] = data_temp
+    else:
+        ch['data'] = samples[0:indices[recordNumber]]  # OR use downsample(samples,1), to save space
+        f.close()
     return ch
     
 def loadSpikes(filepath):
@@ -436,7 +524,7 @@ def pack_2(folderpath, filename = 'openephys.dat', source='100', channels = 'all
     print('Packing data to file: ' + filename)
     data_array.tofile(os.path.join(folderpath,filename))
 
-def pack_2_BoMod(folderpath, filename = 'openephys.dat', source='100', channels = 'all', dref = None):
+def pack_2_BoMod(folderpath, trim, std_lim = 0, filename = 'openephys.dat', source='100', channels = 'all', dref = None):
     
     '''Alternative version of pack which uses numpy's tofile function to write data.
         pack_2 is much faster than pack and avoids quantization noise incurred in pack due
@@ -451,6 +539,13 @@ def pack_2_BoMod(folderpath, filename = 'openephys.dat', source='100', channels 
         
         Nov, 2016
         Modified by Boleszek Osinski to include common median referencing
+        
+        May, 2017
+        Added trim, which is a list of start/stop pairs for noisy regions that must be removed.
+        This code assumes that start/stop paris are ordered from largest to smallest
+        
+        Jun, 2017 added artefact removal
+        if stdlim !=0 then transient noise artifacts are removed using the stdlim value given
         '''
     
     data_array = loadFolderToArray(folderpath, channels, np.int16, source)
@@ -470,8 +565,71 @@ def pack_2_BoMod(folderpath, filename = 'openephys.dat', source='100', channels 
         for i in range(data_array.shape[1]):
             data_array[:,i] = data_array[:,i] - reference
 
+    # trim data if trim values are given
+    if trim != 0:
+        print('Trimming data')
+        for i in range(len(trim)):
+            data_array = np.delete(data_array,np.arange(trim[i][0],trim[i][1],1),axis=0)
+
+    if std_lim != 0:
+        print('Removing artifacts')
+        data_array = remove_artifact(data_array, std_lim)
+
     print('Packing data to file: ' + filename)
     data_array.tofile(os.path.join(folderpath,filename))
+
+
+def remove_artifact(data, std_lim):
+    ''' This is a modified version of Kyler Brown's datartifact function, which is originaly part of the Bark package.
+        The function detects artifcats greater than a threshold and sets all channels to 0 for the duration of the artifact
+        
+        Jun, 2017
+        Added by Boleslaw Osinski'''
+    
+    # data    -  nsamples x nchan array
+    # std_lim -  std threshold for artifact removal
+    
+    n_channels = data.shape[1]
+    
+    # compute standard deviation
+    stds=np.std(data, axis=0)
+    pos_artifacts = [[] for x in range(n_channels)]
+    neg_artifacts = [[] for x in range(n_channels)]
+    assert len(stds) == n_channels
+    for c in range(n_channels):
+        x = data[:, c].copy().flatten()
+        x[x < stds[c] * std_lim] = 0
+        peaks, = argrelmax(x)
+        pos_artifacts[c] += [int(pe) for pe in peaks]
+        
+        x = data[:, c].copy().flatten()
+        x[x > -stds[c] * std_lim] = 0
+        peaks, = argrelmin(x)
+        neg_artifacts[c] = neg_artifacts[c] + [int(pe) for pe in peaks]
+
+    for chan in range(n_channels):
+        for samp in pos_artifacts[c]:
+            data[samp, :] = 0 # remove artifact on all channels
+            t = samp + 1
+            while data[t, chan] > 0.5*stds[chan]:
+                data[t, :] = 0
+                t += 1
+            t = samp - 1
+            while data[t, chan] > 0.5*stds[chan]:
+                data[t, :] = 0
+                t -= 1
+
+        for samp in neg_artifacts[c]:
+            data[samp, :] = 0
+            t = samp + 1
+            while data[t, chan] < -0.5*stds[chan]:
+                data[t, :] = 0
+                t += 1
+            t = samp - 1
+            while data[t, chan] < -0.5*stds[chan]:
+                data[t, :] = 0
+                t -= 1
+    return data
 
 def _get_sorted_channels(folderpath):
     return sorted([int(f.split('_CH')[1].split('.')[0]) for f in os.listdir(folderpath) 
