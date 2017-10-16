@@ -99,6 +99,43 @@ def loadFolderToArray(folderpath, channels = 'all', dtype = float, source = '100
             
     return data_array
 
+def loadFolderToArray_BoMod(folderpath, trim, channels = 'all', dtype = float, source = '100', down = 1):
+    '''Load CH continuous files in specified folder to a single numpy array. By default all
+        CH continous files are loaded in numerical order, ordering can be specified with
+        optional channels argument which should be a list of channel numbers.
+        
+        Modified by Bo to call loadContinous_BoMod
+        
+        Jul, 2017 added downsampling
+        Taking advantage of the downsample function already included in the original OpenEphys module'''
+    
+    if channels == 'all':
+        channels = _get_sorted_channels(folderpath)
+    
+    filelist = [source + '_CH' + x + '.continuous' for x in map(str,channels)]
+
+    t0 = time.time()
+    numFiles = 1
+    
+    channel_1_data = loadContinuous_BoMod(os.path.join(folderpath, filelist[0]), trim, dtype, down)['data']
+    
+    n_samples  = len(channel_1_data)
+    n_channels = len(filelist)
+    
+    data_array = np.zeros([n_samples, n_channels], dtype)
+    data_array[:,0] = channel_1_data
+    
+    for i, f in enumerate(filelist[1:]):
+        data_array[:, i + 1] = loadContinuous_BoMod(os.path.join(folderpath, f), trim, dtype, down)['data']
+        numFiles += 1
+
+    print(''.join(('Avg. Load Time: ', str((time.time() - t0)/numFiles),' sec')))
+    print(''.join(('Total Load Time: ', str((time.time() - t0)),' sec')))
+    
+    return data_array
+
+
+
 def loadContinuous(filepath, dtype = float):
 
     assert dtype in (float, np.int16), \
@@ -173,11 +210,14 @@ def loadContinuous(filepath, dtype = float):
     f.close()
     return ch
 
-def loadContinuous_BoMod(filepath, trim, dtype = float):
+def loadContinuous_BoMod(filepath, trim, dtype = float, down = 1):
     ''' May, 2017
         Modified by Bo
         Added trim, which is a list of start/stop pairs for noisy regions that must be removed.
-        This code assumes that start/stop paris are ordered from largest to smallest '''
+        This code assumes that start/stop paris are ordered from largest to smallest 
+        
+        July 2017
+        Added downsampling option'''
     
     assert dtype in (float, np.int16), \
         'Invalid data type specified for loadContinous, valid types are float and np.int16'
@@ -244,6 +284,8 @@ def loadContinuous_BoMod(filepath, trim, dtype = float):
     #print recordNumber
     #print index
 
+    if down > 1:
+        print('Downsampling by '+str(down))
     # trim data if trim values are given
     ch['header'] = header
     ch['timestamps'] = timestamps[0:recordNumber]
@@ -253,9 +295,10 @@ def loadContinuous_BoMod(filepath, trim, dtype = float):
         print('Trimming data')
         for i in range(len(trim)):
             data_temp = np.delete(data_temp,np.arange(trim[i][0],trim[i][1],1),axis=0)
-        ch['data'] = data_temp
+        ch['data'] = downsample(data_temp,down)
     else:
-        ch['data'] = samples[0:indices[recordNumber]]  # OR use downsample(samples,1), to save space
+        #ch['data'] = samples[0:indices[recordNumber]]  # OR use downsample(samples,1), to save space
+        ch['data'] = downsample(samples[0:indices[recordNumber]],down)
         f.close()
     return ch
     
@@ -382,7 +425,7 @@ def readHeader(f):
     return header
     
 def downsample(trace,down):
-    downsampled = scipy.signal.resample(trace,np.shape(trace)[0]/down)
+    downsampled = scipy.signal.resample(trace,int(np.shape(trace)[0]/down))
     return downsampled
     
 def pack(folderpath,source='100',**kwargs):  
@@ -524,7 +567,7 @@ def pack_2(folderpath, filename = 'openephys.dat', source='100', channels = 'all
     print('Packing data to file: ' + filename)
     data_array.tofile(os.path.join(folderpath,filename))
 
-def pack_2_BoMod(folderpath, trim, std_lim = 0, filename = 'openephys.dat', source='100', channels = 'all', dref = None):
+def pack_2_BoMod(folderpath, trim, std_lim = 0, filename = 'openephys.dat', source='100', channels = 'all', dref = None, down = 1):
     
     '''Alternative version of pack which uses numpy's tofile function to write data.
         pack_2 is much faster than pack and avoids quantization noise incurred in pack due
@@ -546,9 +589,12 @@ def pack_2_BoMod(folderpath, trim, std_lim = 0, filename = 'openephys.dat', sour
         
         Jun, 2017 added artefact removal
         if stdlim !=0 then transient noise artifacts are removed using the stdlim value given
+        
+        Jul, 2017 added downsampling
+        Taking advantage of the downsample function already included in the original OpenEphys module
         '''
     
-    data_array = loadFolderToArray(folderpath, channels, np.int16, source)
+    data_array = loadFolderToArray_BoMod(folderpath, trim, channels, np.int16, source, down)
     
     if dref:
         if dref == 'ave':
@@ -565,12 +611,13 @@ def pack_2_BoMod(folderpath, trim, std_lim = 0, filename = 'openephys.dat', sour
         for i in range(data_array.shape[1]):
             data_array[:,i] = data_array[:,i] - reference
 
-    # trim data if trim values are given
-    if trim != 0:
-        print('Trimming data')
-        for i in range(len(trim)):
-            data_array = np.delete(data_array,np.arange(trim[i][0],trim[i][1],1),axis=0)
+    # trim data if trim values are given (this now occurs in loadContinuous_BoMod)
+    #if trim != 0:
+    #    print('Trimming data')
+    #    for i in range(len(trim)):
+    #        data_array = np.delete(data_array,np.arange(trim[i][0],trim[i][1],1),axis=0)
 
+    # should eventually move artifact removal to loadContinuous_BoMod as well
     if std_lim != 0:
         print('Removing artifacts')
         data_array = remove_artifact(data_array, std_lim)
@@ -580,8 +627,8 @@ def pack_2_BoMod(folderpath, trim, std_lim = 0, filename = 'openephys.dat', sour
 
 
 def remove_artifact(data, std_lim):
-    ''' This is a modified version of Kyler Brown's datartifact function, which is originaly part of the Bark package.
-        The function detects artifcats greater than a threshold and sets all channels to 0 for the duration of the artifact
+    ''' This is a modified version of Kyler Brown's datartifact function, which is originaly part of the Bark package (https://github.com/kylerbrown/bark).
+        The function detects neg and pos artifcats greater than a threshold and sets all channels to 0 for the duration of the artifact
         
         Jun, 2017
         Added by Boleslaw Osinski'''
@@ -589,7 +636,10 @@ def remove_artifact(data, std_lim):
     # data    -  nsamples x nchan array
     # std_lim -  std threshold for artifact removal
     
-    n_channels = data.shape[1]
+    try:
+        n_channels = data.shape[1] # if multichannel
+    except:
+        n_channels = 1 # if single channel
     
     # compute standard deviation
     stds=np.std(data, axis=0)
